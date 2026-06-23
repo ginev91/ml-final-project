@@ -1,112 +1,64 @@
 # Domain Adaptation in Computer Vision
 
-**Evaluating Feature Alignment Methods for Hand-Written Digit Classification (MNIST → USPS)** **Author:** Aleksandar Ginev  
-**Project Type:** Technical Report / Machine Learning Research  
+**Feature Alignment for Handwritten Digit Classification (MNIST → USPS)**
+
+**Author:** Aleksandar Ginev
+**Project Type:** Technical Report / Machine Learning
 
 ---
 
-## Abstract
+## What this project is about
 
-This research investigates the phenomenon of *Domain Shift* within computer vision architectures. When convolutional models or standard classifiers are trained on pristine, synthetic, or perfectly curated imagery, their performance severely degrades when deployed on noisy, real-world target domains. 
+Most ML courses teach train/test splits as if that's the whole story, but that only works if your train and test data come from the same distribution. In real life that's often not true. This project looks at one concrete case of that problem - called domain shift - using two handwritten digit datasets: MNIST (clean, scanned, centered) and USPS (real mail envelopes, lower resolution, much messier handwriting).
 
-Using the classic MNIST (Source) and USPS (Target) datasets, we analyze this performance drop and implement standard Unsupervised Domain Adaptation (UDA) techniques—specifically Correlation Alignment (CORAL)—to mathematically align the latent feature spaces. Our results demonstrate that optimizing the covariance matrices of source and target domains significantly recovers classification accuracy without requiring target labels during training.
+The setup is Unsupervised Domain Adaptation: I get full labels for MNIST, but none for USPS during adaptation. The goal is to train on MNIST and still do reasonably well on USPS, without ever looking at a USPS label until the final evaluation.
 
----
+The main method I use is **CORAL** (Correlation Alignment, Sun & Saenko, 2016), which works by matching the covariance structure of the two domains instead of matching individual images.
 
-## 1. Introduction & Problem Formulation
+## Data
 
-In modern computer vision systems, maintaining high generalization accuracy across shifting visual environments is a persistent challenge. A model trained on clean, digital images often fails when exposed to real-world factors like sensor noise, lighting variations, or changes in handwriting style. 
+- **MNIST (source):** 70,000 grayscale images, 28x28, clean and centered.
+- **USPS (target):** 9,298 grayscale images, natively 16x16, scanned from real mail, noisier and less uniform handwriting.
 
-The objective of this project is to model this "Domain Drift" explicitly by training a classifier on the MNIST dataset and evaluating it on the USPS dataset. We formulate this as an Unsupervised Domain Adaptation task, where the goal is to map both domains into a shared, invariant feature space where a single classifier can succeed.
+Since CORAL needs both domains to have the same number of features, USPS images are upscaled from 16x16 to 28x28 with bilinear interpolation before anything else happens. Both datasets are then scaled to [0, 1].
 
----
+(Note: OpenML flags the USPS version used here as "inactive" due to known issues with that release. I checked the images and labels after loading and they look correct, but it's worth mentioning in case results differ slightly from other USPS versions.)
 
-## 2. Data Acquisition & Vetting
+## Method
 
-Our pipeline utilizes two primary, structurally distinct benchmark datasets containing handwritten digits (0–9):
+1. **Baseline** - train a plain logistic regression on MNIST only, test it both on held-out MNIST and on raw, unadapted USPS. This shows how bad the problem actually is.
+2. **Standardization-only baseline** - a much simpler fix: just z-score each domain on its own (`StandardScaler`), no covariance matching. This is here mainly as a sanity check on CORAL - if a basic rescale gets close to CORAL's result, CORAL isn't adding much.
+3. **CORAL** - whiten the source features (remove their own covariance structure), then re-color them with the target's covariance structure. Train logistic regression on these adapted features, test on raw USPS.
+4. **Sanity check** - directly verify that CORAL actually pulled the source covariance closer to the target covariance, using the Frobenius norm distance between them, before assuming the accuracy numbers mean anything.
 
-- **MNIST (Source Domain):** 70,000 clean, centered, 28x28 pixel grayscale images.  
-- **USPS (Target Domain):** 9,298 uncentered, blurred, and lower-contrast 16x16 pixel grayscale images sampled from actual US Postal Service mail envelopes.  
+All runs are logged with MLflow (classifier, params, accuracy per run) so the numbers below can be reproduced or compared against future changes.
 
-The vetting and ingestion process involved:
-- **Spatial Normalization:** Resampling and resizing the USPS matrices to 28x28 pixels to establish a structural 1:1 input vector compatibility.
-- **Min-Max Scaling:** Normalizing pixel intensity values to the range [0, 1] to stabilize gradient descent during optimization.
+## Results
 
----
+| Setup | Target (USPS) accuracy |
+|---|---|
+| MNIST → MNIST (in-domain, for reference) | 92.11% |
+| MNIST → USPS, no adaptation | 7.70% |
+| MNIST → USPS, standardization only | 36.07% |
+| MNIST → USPS, CORAL | **53.15%** |
 
-## 3. Mathematical Foundations
+CORAL recovers **+45.45 points** over doing nothing, and **+17.08 points** over the simple standardization baseline - so the covariance-matching part of CORAL is doing real work here, not just fixing scale differences.
 
-To identify and correct the spatial drift between domains, we utilize several key mathematical tools:
+The sanity check backs this up directly: the Frobenius distance between the source and target covariance matrices drops from **9.54 to about 0.0003** after CORAL, more than a 99.99% reduction. That's CORAL doing exactly what the math says it should - it isn't a coincidence that accuracy went up.
 
-- **Pixel Vector Representation:** Flattening 28x28 matrices into feature vectors $x \in \mathbb{R}^{784}$.
-- **Covariance Alignment (CORAL):** Computing the second-order statistics (covariance matrices $\Sigma_S$ and $\Sigma_T$) of both domains to find a linear transformation matrix $A$ that minimizes the distance between them.
-- **Maximum Mean Discrepancy (MMD):** Measuring the distance between probability distributions in a Hilbert space.
-- **Softmax Cross-Entropy:** Modeling multi-class categorical probabilities across the 10 digit classes.
+Per-digit performance (from the classification report) is uneven. Digits 0, 1, and 2 end up reasonably well classified (F1 around 0.67-0.74), but 5 and 9 stay weak even after adaptation (F1 around 0.08-0.12). My guess is that CORAL only matches second-order statistics (covariance), not finer shape detail, so digits that get distorted the most by the 16x16 → 28x28 upscaling are still hard to recognize even once the overall feature distributions line up.
 
----
+## What I'd try next
 
-## 4. Data Pre-processing & Feature Engineering
+A non-linear or deep version of this idea (e.g. Deep CORAL, or a fully adversarial approach like DANN) would probably close more of the remaining gap, especially for the digits that stay hard - but that's beyond what's covered in this notebook.
 
-Because raw pixels contain high levels of redundancy, feature processing is vital. Our workflow executes three critical actions:
+## Repo structure
 
-- **Dimensionality Matching:** Bilinear interpolation of target images to match feature vector dimensions.
-- **Mean Centering:** Subtracting the empirical mean of the datasets to align the coordinates around a global origin.
-- **Covariance Regularization:** Adding a small identity matrix perturbation ($\lambda I$) to guarantee that the source covariance matrix is invertible during alignment.
-
----
-
-## 5. Exploratory Data Analysis (EDA)
-
-EDA was executed to validate our core hypotheses regarding Domain Shift:
-
-- **Visual Comparison:** Visualizing raw pixel grids side-by-side to highlight differences in contrast, thickness, and edge noise.
-- **Dimensionality Reduction (PCA & t-SNE):** Projecting the 784-dimensional pixel data into 2D space. The resulting scatter plots reveal a distinct spatial separation between the MNIST cluster and the USPS cluster, visually proving the presence of *Domain Drift*.
-
----
-
-## 6. Modeling & Hypothesis Testing
-
-We establish a baseline using standard classifiers (Logistic Regression / Shallow Neural Network) trained exclusively on the Source domain.
-
-- **Target Variable:** Categorical Digit Label (0–9)  
-- **Source Baseline Accuracy:** ~98% when tested on MNIST validation data.
-- **Cross-Domain Drop:** A severe drop in accuracy (e.g., down to ~65%) when the unadapted baseline model is evaluated directly on the raw USPS dataset.
-- **Experiment Tracking:** All performance drops, hyperparameters, and accuracy shifts are recorded dynamically via **MLflow**.
-
----
-
-## 7. Adaptation Strategy: Latent Space Alignment
-
-We implement the Domain Adaptation mechanism directly on the extracted features:
-
-- **Feature Whitening:** Transforming the source features to have an identity covariance matrix.
-- **Coloring Transformation:** Re-coloring the whitened source features with the precise covariance structure of the target domain ($\Sigma_T$).
-
-This mathematical transformation allows our source classifier to interpret target features smoothly, without modifying the underlying classification layer weights.
-
----
-
-## 8. Results & Interpretation
-
-The implementation of the alignment transformation yields quantifiable performance recoveries:
-
-- **Accuracy Metrics:** Post-adaptation testing on the USPS dataset shows a significant boost in classification accuracy, proving the validity of the alignment matrix.
-- **Confusion Matrix Analysis:** Pre-adaptation models frequently confused digits with similar structural profiles (e.g., 3 vs. 8, or 4 vs. 9) due to target blur. The post-adaptation confusion matrix displays a highly stabilized diagonal layout, indicating clear error reduction.
-- **System Footprint:** The algorithm achieves this optimization linearly, preserving computational efficiency without requiring heavy deep-learning fine-tuning.
-
----
-
-## 9. Conclusion & References
-
-This project confirms that Domain Drift in computer vision is a highly predictable, mathematically correctable phenomenon. By utilizing simple, second-order feature statistics, we successfully bridge the gap between two completely different historical digit scanning systems.
-
-Future extensions of this report include upgrading the linear feature alignment to deep adversarial adaptation (DANN) using deep convolutional layers.
-
----
+- `domain_adaptation_in_computer_vision.ipynb` - the full notebook: data loading, EDA, baseline, standardization comparison, CORAL implementation, and evaluation.
 
 ## References
 
-- LeCun, Y., Cortes, C., & Burges, C. (1998). *The MNIST database of handwritten digits.*
-- Hull, J. J. (1994). *A database for handwritten text recognition research.* (USPS Dataset)
-- Sun, B., Feng, J., & Saenko, K. (2016). *Return of Frustratingly Easy Domain Adaptation.* (CORAL Algorithm)
-- Pedregosa, F. et al. (2011). *Scikit-learn: Machine Learning in Python.*
+- Sun, B., & Saenko, K. (2016). *Deep CORAL: Correlation Alignment for Deep Domain Adaptation.* CVPR Workshops.
+- LeCun, Y., Bottou, L., Bengio, Y., & Haffner, P. (1998). *Gradient-based learning applied to document recognition.* Proceedings of the IEEE, 86(11), 2278-2324.
+- Hull, J. J. (1994). *A database for handwritten text recognition research.* IEEE TPAMI, 16(5), 550-554.
+- Pedregosa, F., et al. (2011). *Scikit-learn: Machine Learning in Python.* JMLR, 12, 2825-2830.
